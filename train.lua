@@ -34,52 +34,65 @@ local big_frames = big_input_sequences:unfold(1,big_frame_size,big_frame_size)
 local frames = input_sequences:unfold(1,frame_size,frame_size)
 prev_samples = prev_samples:unfold(1,frame_size,1)
 
+function big_frame_level_rnn(inp)
+    local L1 = inp 
+             - nn.View(1,-1):setNumInputDims(1)
+             - cudnn.GRU(big_frame_size, big_dim, 1)
+             - nn.View(-1):setNumInputDims(1)
+
+    local output = L1
+                 - nn.Linear(big_dim, dim * big_frame_size / frame_size)
+                 - nn.View(-1,dim)
+
+    local independent_preds = L1
+                            - nn.Linear(big_dim, q_levels * big_frame_size)
+                            - nn.View(-1,q_levels)
+
+    return output, independent_preds
+end
+
+function frame_level_rnn(inp, other_inp)
+    local L2 = inp 
+             - nn.Linear(frame_size, dim)    
+            
+    local output = nn.CAddTable()({L2, other_inp})
+                 - nn.View(1,-1):setNumInputDims(1)
+                 - cudnn.GRU(dim, dim, 1)
+                 - nn.View(-1):setNumInputDims(1)
+                 - nn.Linear(dim, dim * frame_size)
+                 - nn.View(-1,dim)
+
+    return output
+end
+
+function sample_level_predictor(frame_level_outputs, prev_samples)
+    local L3 = prev_samples
+             - nn.Contiguous() 
+             - nn.View(-1,1)
+             - nn.LookupTable(q_levels, emb_size)           
+             - nn.View(-1,frame_size*emb_size)
+             - nn.Linear(frame_size*emb_size, dim, false)
+
+    local output = nn.CAddTable()({L3, frame_level_outputs})
+                 - nn.Linear(dim,dim)
+                 - cudnn.Tanh()
+                 - nn.Linear(dim,dim)
+                 - cudnn.Tanh()
+                 - nn.Linear(dim,q_levels)
+                 - cudnn.SoftMax()
+
+    return output
+end
+
 local i1 = nn.Identity()()
 local i2 = nn.Identity()()
 local i3 = nn.Identity()()
 
-local GRU1 = cudnn.GRU(big_frame_size, big_dim, 1)
-local GRU2 = cudnn.GRU(dim, dim, 1)
+local big_frame_outputs,independent_preds = big_frame_level_rnn(i1)
+local frame_level_outputs = frame_level_rnn(i2, big_frame_outputs)
+local sample_level_outputs = sample_level_predictor(frame_level_outputs, i3)
 
-local L1 = i1 
-           - nn.View(1,-1):setNumInputDims(1)
-           - GRU1
-           - nn.View(-1):setNumInputDims(1)
-
-local output = L1
-              - nn.Linear(big_dim, dim * big_frame_size / frame_size)
-              - nn.View(-1,dim)
-
-local independent_preds = L1
-                          - nn.Linear(big_dim, q_levels * big_frame_size)
-                          - nn.View(-1,q_levels)
-
-local L2 = i2 
-           - nn.Linear(frame_size, dim)    
-            
-local frame_level_outputs = nn.CAddTable()({output,L2})
-                            - nn.View(1,-1):setNumInputDims(1)
-                            - GRU2
-                            - nn.View(-1):setNumInputDims(1)
-                            - nn.Linear(dim, dim * frame_size)
-                            - nn.View(-1,dim)
-
-local L3 = i3 
-           - nn.Contiguous() 
-           - nn.View(-1,1)
-           - nn.LookupTable(q_levels, emb_size)           
-           - nn.View(-1,frame_size*emb_size)
-           - nn.Linear(frame_size*emb_size, dim, false)
-
-local add2 = nn.CAddTable()({L3, frame_level_outputs})
-             - nn.Linear(dim,dim)
-             - cudnn.Tanh()
-             - nn.Linear(dim,dim)
-             - cudnn.Tanh()
-             - nn.Linear(dim,q_levels)
-             - cudnn.SoftMax()
-
-local net = nn.gModule({i1,i2,i3},{add2,independent_preds}):cuda()
+local net = nn.gModule({i1,i2,i3},{sample_level_outputs,independent_preds}):cuda()
 local param,dparam = net:getParameters()
 
 local linearLayers = net:findModules('nn.Linear')
