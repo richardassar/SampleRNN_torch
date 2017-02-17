@@ -1,27 +1,26 @@
 require 'xlua'
 require 'nn'
 require 'gnuplot'
---require 'image'
+require 'image'
 require 'optim'
 require 'cunn'
 require 'cudnn'
-require 'dpnn'
 require 'audio'
 cudnn.fastest = true
 
 --
 local sample_rate = 8000
 
-local max_iter = 100
-local batch_size = 32
+local max_iter = 1000
+local batch_size = 128
 local learning_rate = 0.001
 local max_grad = 1
 --local max_grad_norm = 0.1
 
-local seg_len = 1*sample_rate
+local seg_len = 8*sample_rate
 local seq_len = 512
-local big_frame_size = 64
-local frame_size = 16
+local big_frame_size = 16
+local frame_size = 8
 
 local big_dim = 1024
 local dim = big_dim
@@ -29,15 +28,14 @@ local q_levels = 256
 local emb_size = 256
 
 local n_samples = 5
-local sample_length = 1*sample_rate
+local sample_length = 25*sample_rate
 
 --
-local dat = audio.load('beethoven_8k.wav'):view(-1)[{{1*8000,61*8000}}]
+local dat = audio.load('beethoven_8k.wav'):view(-1)
 dat:csub(dat:min())
 dat:div(dat:max())
 
 dat = dat:unfold(1,seg_len,seg_len)
---dat = dat:narrow(1,2,1)
 
 dat = dat:unfold(2,seq_len+big_frame_size,seq_len)
 dat = dat:transpose(1,2)
@@ -70,7 +68,7 @@ local big_frame_level_rnn = nn.Sequential()
         :add(nn.Sequential()
             :add(nn.Bottle(nn.Linear(big_dim, q_levels * big_frame_size)))
             :add(nn.View(-1,q_levels):setNumInputDims(2))
-            :add(nn.Bottle(cudnn.SoftMax()))
+            :add(nn.Bottle(cudnn.LogSoftMax()))
         )
     )
 
@@ -103,11 +101,11 @@ local sample_level_predictor = nn.Sequential()
     :add(nn.Bottle(
         nn.Sequential()
             :add(nn.Linear(dim,dim))
-            :add(cudnn.Tanh())
+            :add(cudnn.ReLU())
             :add(nn.Linear(dim,dim))
-            :add(cudnn.Tanh())
+            :add(cudnn.ReLU())
             :add(nn.Linear(dim,q_levels))
-            :add(cudnn.SoftMax())        
+            :add(cudnn.LogSoftMax())        
     ))    
     
 local net = nn.Sequential()
@@ -148,11 +146,11 @@ local net = nn.Sequential()
     )
     :cuda()
 
---[[local gpus = torch.range(1, cutorch.getDeviceCount()):totable()
+local gpus = torch.range(1, cutorch.getDeviceCount()):totable()
 net = nn.DataParallelTable(1,true,false):add(net,gpus):threads(function() -- TODO: optional nccl
     local cudnn = require 'cudnn'
     cudnn.fastest = true
-end):cuda()]]--
+end):cuda()
 
 local linearLayers = net:findModules('nn.Linear')
 for k,v in pairs(linearLayers) do
@@ -170,13 +168,11 @@ function resetStates(model)
     else
         local grus = model:findModules('cudnn.GRU')
         for i=1,#grus do
-            --grus[i].batchfirst=true
             grus[i]:resetStates()            
         end
 
         local lookups = model:findModules('nn.LookupTable')
         for i=1,#lookups do
-            --grus[i].batchfirst=true
             lookups[i]:clearState()
         end
     end
@@ -187,18 +183,18 @@ function train(net)
 
     local param,dparam = net:getParameters()
     
-    local crit1 = nn.ModuleCriterion(nn.ClassNLLCriterion(), nn.Log())
-    local crit2 = nn.ModuleCriterion(nn.ClassNLLCriterion(), nn.Log())
+    local crit1 = nn.ClassNLLCriterion()
+    local crit2 = nn.ClassNLLCriterion()
 
     local criterion = nn.ParallelCriterion()
         :add(crit1)
         :add(crit2)
         :cuda()
 
-    --local optim_state = torch.load("optim_state.t7")
-    local optim_state = {
+    local optim_state = torch.load("optim_state.t7")
+    --[[local optim_state = {
         learningRate = learning_rate
-    }
+    }]]--
 
     local losses = torch.DoubleTensor(max_iter)
     for i = 1,max_iter do
@@ -245,6 +241,7 @@ function train(net)
                     pred[2]=pred[2]:view(-1,q_levels)
                     
                     local loss = criterion:forward(pred,out)
+                    print(loss)
 
                     local grad = criterion:backward(net.output,out)
                     grad[1]=grad[1]:view(inp[3]:size(1),inp[3]:size(2),q_levels)
@@ -260,56 +257,30 @@ function train(net)
                     end]]--
 
                     dparam:clamp(-max_grad, max_grad)                                    
+
                     
                     return loss,dparam                    
                 end
 
                 local _, err = optim.adam(feval,param,optim_state)
                 total_err = total_err + err[1]
-
-                --print("T: "..t)
             end
-
-            --print("Batch: "..j)
         end
 
         local err = total_err -- TODO: nats * math.log(math.exp(1),2)
         losses[i] = err
 
-        --image.save(string.format('vis/%05d.png', i), image.vflip(image.toDisplayTensor(net.output[1]:t())))
-    
-        --[[if i%10 == 0 then
-            torch.save(string.format("checkpoints/%d.t7",i), {
-                net=net:get(1),
-                optim_state=optim_state
-            })
+        torch.save("optim_state.t7", optim_state)        
+        torch.save("net.t7",net)
+            
+        image.save(string.format('vis/%05d.png', i), image.vflip(image.toDisplayTensor(torch.exp(net.output[1]):t())))
 
-            sample(net,i,string.format("samples/%d.wav",idx))
-        end]]--
-
-        --xlua.progress(i,max_iter)
-        --print("\n\n")
-        
-        --torch.save("optim_state.t7", optim_state)
-        --torch.save("net.t7",net)
+        gnuplot.pngfigure('loss_curve.png')
+        gnuplot.plot(losses[{{1,i}}],'-')
+        gnuplot.plotflush()
 
         print('Iter: '..i..', loss = '..err)
     end
-
-    --[[val,idx = torch.max(net.output[1][{1,{},{}}],2)
-
-    gnuplot.pngfigure('plot_labels.png')
-    gnuplot.raw("set terminal pngcairo size 1280, 768")
-    gnuplot.plot({'True',target_sequences,'-'}, {'Predicted',idx,'-'})
-    gnuplot.plotflush()]]--
-
-    --image.save('probs.png', image.vflip(image.toDisplayTensor(net.output[1][{1,{},{}}]:t())))
-
-    torch.save("optim_state.t7", optim_state)
-
-    gnuplot.pngfigure('loss_curve.png')
-    gnuplot.plot(losses,'-')
-    gnuplot.plotflush()
 end
 
 function sample(net,filepath)
@@ -324,7 +295,7 @@ function sample(net,filepath)
 
     samples[{{},{},{1,big_frame_size}}] = math.floor(q_levels / 2) -- Silence
     --samples[{{},{},{1,big_frame_size}}] = torch.floor(torch.rand(n_samples,1,big_frame_size)*q_levels) -- Uniform noise
-    --samples[{{},{},{1,big_frame_size}}] = q_dat[{{1},{1},{1,big_frame_size}}]:expandAs(samples[{{},{},{1,big_frame_size}}]) -- A snippet of a sample from the training set
+    --samples[{{},{},{1,big_frame_size}}] = q_dat[{{2},{1},{1,big_frame_size}}]:expandAs(samples[{{},{},{1,big_frame_size}}]) -- A snippet of a sample from the training set
 
     --[[big_rnn.cellInput = torch.rand(1, n_samples, big_dim):cuda() - 0.5 -- Randomise the RNN initial state state
     big_rnn.hiddenInput = torch.rand(1, n_samples, big_dim):cuda() - 0.5
@@ -351,10 +322,9 @@ function sample(net,filepath)
 
         local inp = {frame_level_outputs[{{},{_t}}], prev_samples:contiguous()}
         
-        local sample = sample_level_predictor:forward(inp)
-        --[[sample:log()
-        sample:div(1.5) -- Sampling temperature
-        sample:exp()]]
+        local sample = sample_level_predictor:forward(inp)        
+        --sample:div(1.5) -- Sampling temperature
+        sample:exp()
         sample = torch.multinomial(sample:squeeze(),1)
         
         samples[{{},1,t}] = sample
@@ -364,11 +334,6 @@ function sample(net,filepath)
     local stop_time = sys.clock()
 
     print("Generated "..(sample_length / sample_rate * n_samples).." seconds of audio in "..(stop_time - start_time).." seconds.")
-
-    gnuplot.pngfigure('sample_output.png')
-    gnuplot.raw("set terminal pngcairo size 1280, 768")
-    gnuplot.plot(samples[{1,1,{}}],'-')
-    gnuplot.plotflush()
 
     local audioOut = -0x80000000 + 0xFFFF0000 * (samples - 1) / (q_levels - 1)
 
@@ -381,15 +346,14 @@ function sample(net,filepath)
     net:training()
 end
 
---net=torch.load("net.t7")
+net=torch.load("net.t7")
 train(net)
-torch.save("net.t7",net)
 
---[[net=torch.load("net.t7")
+--[[net=torch.load("net.t7"):get(1)
 big_frame_level_rnn = net:get(1):get(1)
 frame_level_rnn = net:get(2):get(1):get(2)
 sample_level_predictor = net:get(3):get(1):get(2)
 big_rnn = big_frame_level_rnn:get(4)
-frame_rnn = frame_level_rnn:get(3)]]--
+frame_rnn = frame_level_rnn:get(3)
 
-sample(net,'sample.wav')
+sample(net,'sample.wav')]]--
