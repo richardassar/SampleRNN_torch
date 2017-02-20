@@ -6,10 +6,9 @@ require 'optim'
 require 'cunn'
 require 'cudnn'
 require 'audio'
-cudnn.fastest = true
 
 --
-local sample_rate = 8000
+local dat,sample_rate = audio.load('backup/BeethovenSonata1.wav')
 
 local max_iter = 1000
 local batch_size = 128
@@ -19,8 +18,8 @@ local max_grad = 1
 
 local seg_len = 8*sample_rate
 local seq_len = 512
-local big_frame_size = 16
-local frame_size = 8
+local big_frame_size = 8
+local frame_size = 2
 
 local big_dim = 1024
 local dim = big_dim
@@ -31,11 +30,13 @@ local n_samples = 5
 local sample_length = 25*sample_rate
 
 --
-local dat = audio.load('beethoven_8k.wav'):view(-1)
+dat = dat:mean(2):squeeze() -- stereo to mono
 dat:csub(dat:min())
 dat:div(dat:max())
 
-dat = dat:unfold(1,seg_len,seg_len)
+dat = dat:unfold(1,seg_len,1*sample_rate):contiguous()
+--dat:csub(dat:min(2):expandAs(dat))
+--dat:cdiv(dat:max(2):expandAs(dat))
 
 dat = dat:unfold(2,seq_len+big_frame_size,seq_len)
 dat = dat:transpose(1,2)
@@ -149,7 +150,6 @@ local net = nn.Sequential()
 local gpus = torch.range(1, cutorch.getDeviceCount()):totable()
 net = nn.DataParallelTable(1,true,false):add(net,gpus):threads(function() -- TODO: optional nccl
     local cudnn = require 'cudnn'
-    cudnn.fastest = true
 end):cuda()
 
 local linearLayers = net:findModules('nn.Linear')
@@ -170,19 +170,16 @@ function resetStates(model)
         for i=1,#grus do
             grus[i]:resetStates()            
         end
-
-        local lookups = model:findModules('nn.LookupTable')
-        for i=1,#lookups do
-            lookups[i]:clearState()
-        end
     end
+
+    model:clearState()
 end
 
 function train(net)
     net:training()
 
     local param,dparam = net:getParameters()
-    
+
     local crit1 = nn.ClassNLLCriterion()
     local crit2 = nn.ClassNLLCriterion()
 
@@ -207,17 +204,20 @@ function train(net)
         while start<=big_frames:size(2) do
             local stop = start+batch_size-1
             if stop>big_frames:size(2) then
+                break -- Smaller batches seem to hurt the network
                 stop = big_frames:size(2)
             end
 
-            batches[#batches + 1] = ord[{{start,stop}}]           
-            start=start+batch_size
+            batches[#batches + 1] = ord[{{start,stop}}]
+            start=stop+1
         end
-        
+
         for j=1,#batches do        
             local k=batches[j]
 
-            resetStates(net)
+            print("Batch "..j.."/"..#batches)
+            
+            resetStates(net)       
             for t=1,big_frames:size(1) do    
                 local _big_frames = big_frames:select(1,t):index(1,k):cuda()
                 local _frames = frames:select(1,t):index(1,k):cuda()
@@ -241,7 +241,7 @@ function train(net)
                     pred[2]=pred[2]:view(-1,q_levels)
                     
                     local loss = criterion:forward(pred,out)
-                    print(loss)
+                    print(t.."/"..big_frames:size(1), loss, crit1.output * math.log(math.exp(1),2))
 
                     local grad = criterion:backward(net.output,out)
                     grad[1]=grad[1]:view(inp[3]:size(1),inp[3]:size(2),q_levels)
@@ -256,15 +256,14 @@ function train(net)
                         dparam:mul(shrink_factor)
                     end]]--
 
-                    dparam:clamp(-max_grad, max_grad)                                    
-
+                    dparam:clamp(-max_grad, max_grad)
                     
                     return loss,dparam                    
                 end
 
                 local _, err = optim.adam(feval,param,optim_state)
                 total_err = total_err + err[1]
-            end
+            end            
         end
 
         local err = total_err -- TODO: nats * math.log(math.exp(1),2)
@@ -280,14 +279,22 @@ function train(net)
         gnuplot.plotflush()
 
         print('Iter: '..i..', loss = '..err)
+
+        path.mkdir(string.format('samples/%d/',i))
+        sample(net,string.format('samples/%d/sample.wav',i))
     end
 end
 
 function sample(net,filepath)
     print("Sampling...")
 
-    net:evaluate()
+    local big_frame_level_rnn = net:get(1):get(1):get(1)
+    local frame_level_rnn = net:get(1):get(2):get(1):get(2)
+    local sample_level_predictor = net:get(1):get(3):get(1):get(2)
+    local big_rnn = big_frame_level_rnn:get(4)
+    local frame_rnn = frame_level_rnn:get(3)
 
+    net:evaluate()
     resetStates(net)
 
     local samples = torch.CudaTensor(n_samples, 1, sample_length):fill(0)
@@ -303,6 +310,7 @@ function sample(net,filepath)
     frame_rnn.hiddenInput = torch.rand(1, n_samples, big_dim):cuda() - 0.5]]--
 
     local start_time = sys.clock()
+
     for t = big_frame_size + 1, sample_length do
         if (t-1) % big_frame_size == 0 then
             local big_frames = samples[{{},{},{t - big_frame_size, t - 1}}]
@@ -323,7 +331,7 @@ function sample(net,filepath)
         local inp = {frame_level_outputs[{{},{_t}}], prev_samples:contiguous()}
         
         local sample = sample_level_predictor:forward(inp)        
-        --sample:div(1.5) -- Sampling temperature
+        --sample:div(1.1) -- Sampling temperature
         sample:exp()
         sample = torch.multinomial(sample:squeeze(),1)
         
@@ -331,12 +339,11 @@ function sample(net,filepath)
 
         xlua.progress(t-big_frame_size,sample_length-big_frame_size)
     end
-    local stop_time = sys.clock()
 
+    local stop_time = sys.clock()
     print("Generated "..(sample_length / sample_rate * n_samples).." seconds of audio in "..(stop_time - start_time).." seconds.")
 
     local audioOut = -0x80000000 + 0xFFFF0000 * (samples - 1) / (q_levels - 1)
-
     for i=1,audioOut:size(1) do
         audio.save(filepath:gsub(".wav",string.format("_%d.wav",i)), audioOut:select(1,i):t():double(), sample_rate)
     end
@@ -348,12 +355,3 @@ end
 
 net=torch.load("net.t7")
 train(net)
-
---[[net=torch.load("net.t7"):get(1)
-big_frame_level_rnn = net:get(1):get(1)
-frame_level_rnn = net:get(2):get(1):get(2)
-sample_level_predictor = net:get(3):get(1):get(2)
-big_rnn = big_frame_level_rnn:get(4)
-frame_rnn = frame_level_rnn:get(3)
-
-sample(net,'sample.wav')]]--
