@@ -1,11 +1,12 @@
 require 'xlua'
 require 'nn'
 require 'gnuplot'
-require 'image'
 require 'optim'
 require 'cunn'
 require 'cudnn'
+--require 'rnn'
 require 'audio'
+require 'LinearWeightNorm' -- PR submitted for this module
 
 local threads = require 'threads'
 threads.serialization('threads.sharedserialize')
@@ -18,7 +19,6 @@ local max_epoch = 1000
 local minibatch_size = 128
 local learning_rate = 0.001
 local max_grad = 1
---local max_grad_norm = 0.1
 
 local sample_rate = 16000
 local seg_len = 8 * sample_rate
@@ -37,8 +37,18 @@ local sample_length = 25*sample_rate
 
 --
 function create_samplernn()
-    local big_rnn = cudnn.GRU(big_frame_size, big_dim, 1, true, false, true)
-    local frame_rnn = cudnn.GRU(dim, dim, 1, true, false, true)
+    local big_rnn = cudnn.GRU(big_frame_size, big_dim, 1, true, true, true) -- TODO: Optional dropout
+    local frame_rnn = cudnn.GRU(dim, dim, 1, true, true, true)
+
+    --[[local big_rnn = nn.SeqGRU(big_frame_size, big_dim)--, 1, true, false, true)
+    local frame_rnn = nn.SeqGRU(dim, dim)--, 1, true, false, true)
+    big_rnn:remember('both')
+    frame_rnn:remember('both')
+    big_rnn.batchfirst = true
+    frame_rnn.batchfirst = true]]--
+
+    local linearType = 'LinearWeightNorm'
+    local LinearLayer = nn[linearType]
 
     local big_frame_level_rnn = nn.Sequential()
         :add(nn.AddConstant(-1))    
@@ -48,11 +58,11 @@ function create_samplernn()
         :add(nn.Contiguous())
         :add(nn.ConcatTable()
             :add(nn.Sequential()
-                :add(nn.Bottle(nn.Linear(big_dim, dim * big_frame_size / frame_size)))
+                :add(nn.Bottle(LinearLayer(big_dim, dim * big_frame_size / frame_size)))
                 :add(nn.View(-1,dim):setNumInputDims(2))
             )
             :add(nn.Sequential()
-                :add(nn.Bottle(nn.Linear(big_dim, q_levels * big_frame_size)))
+                :add(nn.Bottle(LinearLayer(big_dim, q_levels * big_frame_size))) -- TODO: look at simplifying bottle->view->bottle
                 :add(nn.View(-1,q_levels):setNumInputDims(2))
                 :add(nn.Bottle(cudnn.LogSoftMax()))
             )
@@ -64,33 +74,33 @@ function create_samplernn()
                 :add(nn.AddConstant(-1))
                 :add(nn.MulConstant(4/(q_levels-1)))
                 :add(nn.AddConstant(-2))
-                :add(nn.Bottle(nn.Linear(frame_size, dim)))
+                :add(nn.Bottle(LinearLayer(frame_size, dim)))
             )
             :add(nn.Identity())
         )
         :add(nn.CAddTable())
         :add(frame_rnn)
         :add(nn.Contiguous())
-        :add(nn.Bottle(nn.Linear(dim, dim * frame_size)))
+        :add(nn.Bottle(LinearLayer(dim, dim * frame_size)))
         :add(nn.View(-1,dim):setNumInputDims(2))
         
     local sample_level_predictor = nn.Sequential()
         :add(nn.ParallelTable()
             :add(nn.Identity())
             :add(nn.Sequential()
-                :add(nn.Bottle(nn.LookupTable(q_levels, emb_size),2,3)) -- TODO: Use https://github.com/facebook/fbcunn/blob/master/src/LookupTableGPU.cu
+                :add(nn.Bottle(nn.LookupTable(q_levels, emb_size),2,3)) -- TODO: look at simplifying bottle->view->bottle
                 :add(nn.View(-1,frame_size*emb_size):setNumInputDims(3))
-                :add(nn.Bottle(nn.Linear(frame_size*emb_size, dim, false)))
+                :add(nn.Bottle(LinearLayer(frame_size*emb_size, dim, false)))
             )
         )
         :add(nn.CAddTable())
         :add(nn.Bottle(
             nn.Sequential()
-                :add(nn.Linear(dim,dim))
+                :add(LinearLayer(dim,dim))
                 :add(cudnn.ReLU())
-                :add(nn.Linear(dim,dim))
+                :add(LinearLayer(dim,dim))
                 :add(cudnn.ReLU())
-                :add(nn.Linear(dim,q_levels))
+                :add(LinearLayer(dim,q_levels))
                 :add(cudnn.LogSoftMax())        
         ))    
         
@@ -132,17 +142,56 @@ function create_samplernn()
         )
         :cuda()
 
-    local gpus = torch.range(1, cutorch.getDeviceCount()):totable()
-    net = nn.DataParallelTable(1,true,false):add(net,gpus):threads(function() -- TODO: optional nccl
-        local cudnn = require 'cudnn'
-    end):cuda()
-
-    local linearLayers = net:findModules('nn.Linear')
-    for k,v in pairs(linearLayers) do
-        v:reset(math.sqrt(2/(v.weight:size(2)))) -- He initialization
+    -- TODO: optional ref_init   
+    --[[local linearLayers = net:findModules('nn.'..linearType)
+    for _,linear in pairs(linearLayers) do
+        linear:reset(math.sqrt(2 / linear.weight:size(2))) -- 'He' initialization
+        if linear.bias then
+            linear.bias:zero()
+        end
     end
 
-    -- TODO: initialize GRU weights
+    local grus = net:findModules('cudnn.GRU')
+    for _,gru in pairs(grus) do
+        local biases = gru:biases()[1]
+        for k,v in pairs(biases) do
+            v:zero()
+        end
+
+        local weights = gru:weights()[1]
+
+        local stdv = math.sqrt(1 / gru.inputSize) * math.sqrt(3) -- 'LeCunn' initialization
+        weights[1]:uniform(-stdv, stdv) 
+        weights[2]:uniform(-stdv, stdv) 
+        weights[3]:uniform(-stdv, stdv) 
+
+        stdv = math.sqrt(1 / gru.hiddenSize) * math.sqrt(3)
+        weights[4]:uniform(-stdv, stdv) 
+        weights[5]:uniform(-stdv, stdv) 
+
+        function ortho(inputDim,outputDim)
+            local rand = torch.randn(outputDim,inputDim)
+            local q,r = torch.qr(rand)
+            return q
+        end
+
+        weights[6]:view(gru.hiddenSize,gru.hiddenSize):copy(ortho(gru.hiddenSize,gru.hiddenSize)) -- Ortho initialization
+    end]]--
+
+    --[[net:replace(function(module)
+        if torch.typename(module) == 'cudnn.GRU' then
+            return cudnn.CudnnRNNWeightNorm(module)
+        else
+            return module
+        end
+    end)]]--
+
+    local gpus = torch.range(1, cutorch.getDeviceCount()):totable()
+    net = nn.DataParallelTable(1,true,true):add(net,gpus):threads(function() -- TODO: optional nccl, optional GPU
+        local cudnn = require 'cudnn'
+        --require 'rnn'
+        require 'LinearWeightNorm'
+    end):cuda()
 
     return net
 end
@@ -166,11 +215,20 @@ function create_thread_pool(n_threads)
             function load(path)
                 local aud = audio.load(path)                
                 aud = aud:select(2,1) -- Mono only
-                aud:csub(aud:min())
+
+                aud:csub(aud:min()) -- TODO: Choice of  'linear', 'mu-law', 'max-amp'
                 aud:div(aud:max())
                 aud:mul(q_levels - 1)
                 aud:floor()
                 aud:add(1)
+
+                --[[aud:csub(-0x80000000)
+                aud:div(0x7FFF0000 - (-0x80000000))
+                aud:mul(q_levels - 1)
+                aud:floor()
+                aud:add(1)]]--
+
+                -- TODO: try mu-law
 
                 return aud
             end
@@ -193,10 +251,6 @@ function make_minibatch(thread_pool, files, indices, start, stop)
             end,
             function(k)                
                 dat[{j,{1,k:size(1)}}] = k                            
-                if k:size(1) < seg_len then
-                    dat[{j,{k:size(1)+1,seg_len}}] = q_zero
-                end
-
                 j = j + 1                
             end,
             file_path
@@ -211,42 +265,36 @@ end
 function resetStates(model)
     if model.impl then
         model.impl:exec(function(m)
-            local grus = m:findModules('cudnn.GRU')
+            local grus = m:findModules('cudnn.GRU')--nn.SeqGRU')
             for i=1,#grus do
                 grus[i]:resetStates()
             end
-
-            local lookups = m:findModules('nn.LookupTable')
-            for i=1,#lookups do
-                lookups[i]:clearState()
-            end
         end)
     else
-        local grus = model:findModules('cudnn.GRU')
+        local grus = model:findModules('cudnn.GRU')--nn.SeqGRU')
         for i=1,#grus do
             grus[i]:resetStates()
         end
-
-        local lookups = model:findModules('nn.LookupTable')
-        for i=1,#lookups do
-            lookups[i]:clearState()
-        end
     end
+end
+
+function getSingleModel(model)
+    return model.impl and model.impl:exec(function(model) return model end, 1)[1] or model
 end
 
 function train(net, files)
     net:training()
 
     local param,dparam = net:getParameters()
+    --param:copy(torch.load("params.t7"))
+    --net:syncParameters()
 
     local crit1 = nn.ClassNLLCriterion()
     local crit2 = nn.ClassNLLCriterion()
-    --crit1.sizeAverage = false
-    --crit2.sizeAverage = false
 
     local criterion = nn.ParallelCriterion()
         :add(crit1)
-        :add(crit2)
+        :add(crit2,0)
         :cuda()
 
     --local optim_state = torch.load("optim_state.t7")
@@ -256,38 +304,42 @@ function train(net, files)
 
     local thread_pool = create_thread_pool(n_threads)
 
-    local losses = {}
+    local sample_idx = 1
+    local total_iter = 0
+
+    local losses = {}--torch.load("losses.t7")
+    local gradNorms = {}--torch.load("gradNorms.t7")
     for epoch = 1,max_epoch do
         local total_err = 0
 
         local shuffled_files = torch.randperm(#files):long()
 
         local max_batches = math.floor(#files / minibatch_size)
-        local n_batch = 1
+        local n_batch = 0
 
-        local start=1
+        local start = 1
         while start <= #files do
             local stop = start + minibatch_size - 1
             if stop > #files then
                 break
             end
 
-            print("Mini-batch "..n_batch.."/"..max_batches)
             n_batch = n_batch + 1
+            print("Mini-batch "..n_batch.."/"..max_batches)
 
             local minibatch = make_minibatch(thread_pool, files, shuffled_files, start, stop)
-            minibatch = minibatch:unfold(2,seq_len+big_frame_size,seq_len)
+            local minibatch_seqs = minibatch:unfold(2,seq_len+big_frame_size,seq_len)
 
-            local big_input_sequences = minibatch[{{},{},{1,-1-big_frame_size}}]
-            local input_sequences = minibatch[{{},{},{big_frame_size-frame_size+1,-1-frame_size}}]
-            local target_sequences = minibatch[{{},{},{big_frame_size+1,-1}}]
-            local prev_samples = minibatch[{{},{},{big_frame_size-frame_size+1,-1-1}}]
+            local big_input_sequences = minibatch_seqs[{{},{},{1,-1-big_frame_size}}]
+            local input_sequences = minibatch_seqs[{{},{},{big_frame_size-frame_size+1,-1-frame_size}}]
+            local target_sequences = minibatch_seqs[{{},{},{big_frame_size+1,-1}}]
+            local prev_samples = minibatch_seqs[{{},{},{big_frame_size-frame_size+1,-1-1}}]
 
             local big_frames = big_input_sequences:unfold(3,big_frame_size,big_frame_size)
             local frames = input_sequences:unfold(3,frame_size,frame_size)
             prev_samples = prev_samples:unfold(3,frame_size,1)
-
-            resetStates(net)                   
+                        
+            resetStates(net)            
             for t=1,big_frames:size(2) do
                 local _big_frames = big_frames:select(2,t):cuda()
                 local _frames = frames:select(2,t):cuda()
@@ -299,7 +351,7 @@ function train(net, files)
                 local out = {targets,targets}
 
                 function feval(x)
-                    if x ~= param then                        
+                    if x ~= param then
                         param:copy(x)
                         net:syncParameters()
                     end
@@ -307,85 +359,101 @@ function train(net, files)
                     net:zeroGradParameters()
             
                     local pred = net:forward(inp)    
-                    pred[1]=pred[1]:view(-1,q_levels)
-                    pred[2]=pred[2]:view(-1,q_levels)
-                    
+                    pred[1] = pred[1]:view(-1,q_levels)
+                    pred[2] = pred[2]:view(-1,q_levels)
+
                     local loss = criterion:forward(pred,out)
-                    print(t.."/"..big_frames:size(2), loss, crit1.output * math.log(math.exp(1),2))
-                    
+
                     local grad = criterion:backward(net.output,out)
-                    grad[1]=grad[1]:view(inp[3]:size(1),inp[3]:size(2),q_levels)
-                    grad[2]=grad[2]:view(inp[3]:size(1),inp[3]:size(2),q_levels)                
+                    grad[1] = grad[1]:view(inp[3]:size(1),inp[3]:size(2),q_levels)
+                    grad[2] = grad[2]:view(inp[3]:size(1),inp[3]:size(2),q_levels)   
 
                     net:backward(inp,grad)
 
-                    --[[local grad_norm = dparam:norm(2)
-                    if grad_norm > max_grad_norm then
-                        --print(grad_norm)
-                        local shrink_factor = max_grad_norm / grad_norm
-                        dparam:mul(shrink_factor)
-                    end]]--
-
+                    local grad_norm_preclamp = dparam:norm(2)
                     dparam:clamp(-max_grad, max_grad)
+                    local grad_norm_postclamp = dparam:norm(2)
+
+                    print(t.."/"..big_frames:size(2), loss, crit1.output * math.log(math.exp(1),2), grad_norm_preclamp, grad_norm_postclamp)
                     
-                    return loss,dparam                    
-                end
+                    return crit1.output,dparam--loss,dparam                    
+                end                
 
                 local _, err = optim.adam(feval,param,optim_state)
-                total_err = total_err + err[1]
 
+                total_err = total_err + err[1]                    
+
+                gradNorms[#gradNorms + 1] = dparam:norm(2)
                 losses[#losses + 1] = err[1]
-            end    
+                total_iter = total_iter + 1
+            end
+            
+            local start_time = sys.clock() 
 
             local lossesTensor = torch.Tensor(#losses)
             for i=1,#losses do
-                lossesTensor[i] = losses[i]
+                lossesTensor[i] = losses[i] * math.log(math.exp(1),2)
             end
 
-            gnuplot.pngfigure('loss_curve.png')
+            print("Plotting loss curve ...")
+
+            --gnuplot.pngfigure('loss_curve.png')            
+            gnuplot.pdffigure('loss_curve.pdf')
             gnuplot.plot(lossesTensor,'-')
             gnuplot.plotflush()
             gnuplot.close()
-            
+            --end
+
+            print("Saving losses ...")
+            torch.save("losses.t7", losses)                
+            print("Saving gradNorms ...")
+            torch.save("gradNorms.t7", gradNorms)                
+            print("Saving batch...")
+            torch.save("minibatch.t7", {files=files, shuffled_files=shuffled_files, start=start, stop=stop, minibatch=minibatch})        
+            print("Saving optim state ...")
+            torch.save("optim_state.t7", optim_state)                
+            print("Saving params ...")
+            torch.save("params.t7", param)
+            --[[print("Saving net ...")
+            torch.save("net.t7",net)]]--
+            print("Done!")
+
+            local stop_time = sys.clock()
+
+            print("Saved network and state (took "..(stop_time - start_time).." seconds)")
+
+            --path.mkdir(string.format('samples/%d/',sample_idx))        
+            --sample(getSingleModel(net), string.format('samples/%d/sample.wav',sample_idx)) -- TODO: get single gpu model helper
+            --sample_idx = sample_idx + 1
+
             start = stop + 1
         end
 
-        local err = total_err -- TODO: nats * math.log(math.exp(1),2)
-        
-        print('Epoch: '..epoch..', loss = '..err)
-
-        local start_time = sys.clock()
-        torch.save("optim_state.t7", optim_state)                
-        torch.save("params.t7", param) -- torch.save("net.t7",net)
-        local stop_time = sys.clock()
-
-        print("Saved network and state (took "..(stop_time - start_time).." seconds)")
-
-        --path.mkdir(string.format('samples/%d/',epoch))
-        --sample(net,string.format('samples/%d/sample.wav',epoch))
+        local err = total_err -- TODO: nats * math.log(math.exp(1),2)       
+        print('Epoch: '..epoch..', loss = '..err) -- TODO: avg over batch*timesteps
     end
 end
 
 function sample(net,filepath)
     print("Sampling...")
 
-    local big_frame_level_rnn = net:get(1):get(1):get(1)
-    local frame_level_rnn = net:get(1):get(2):get(1):get(2)
-    local sample_level_predictor = net:get(1):get(3):get(1):get(2)
+    local big_frame_level_rnn = net:get(1):get(1)
+    local frame_level_rnn = net:get(2):get(1):get(2)
+    local sample_level_predictor = net:get(3):get(1):get(2)
     local big_rnn = big_frame_level_rnn:get(4)
     local frame_rnn = frame_level_rnn:get(3)
 
-    net:evaluate()
+    net:evaluate() -- e.g if dropout was used
     resetStates(net)
 
-    local samples = torch.CudaTensor(n_samples, 1, sample_length):fill(0)
+    local samples = torch.CudaTensor(n_samples, 1, sample_length)--:fill(0)
     local big_frame_level_outputs, frame_level_outputs
 
     samples[{{},{},{1,big_frame_size}}] = q_zero -- Silence
     --samples[{{},{},{1,big_frame_size}}] = torch.floor(torch.rand(n_samples,1,big_frame_size)*q_levels) -- Uniform noise
     --samples[{{},{},{1,big_frame_size}}] = q_dat[{{2},{1},{1,big_frame_size}}]:expandAs(samples[{{},{},{1,big_frame_size}}]) -- A snippet of a sample from the training set
 
-    --[[big_rnn.cellInput = torch.rand(1, n_samples, big_dim):cuda() - 0.5 -- Randomise the RNN initial state state
+    --[[big_rnn.cellInput = torch.rand(1, n_samples, big_dim):cuda() - 0.5 -- Randomise the RNN initial state TODO: Fix, this doesn't work because you have to create and set the hiddenOutput tensors
     big_rnn.hiddenInput = torch.rand(1, n_samples, big_dim):cuda() - 0.5
     frame_rnn.cellInput = torch.rand(1, n_samples, big_dim):cuda() - 0.5
     frame_rnn.hiddenInput = torch.rand(1, n_samples, big_dim):cuda() - 0.5]]--
@@ -395,7 +463,7 @@ function sample(net,filepath)
     for t = big_frame_size + 1, sample_length do
         if (t-1) % big_frame_size == 0 then
             local big_frames = samples[{{},{},{t - big_frame_size, t - 1}}]
-            big_frame_level_outputs = big_frame_level_rnn:forward(big_frames)[1]                    
+            big_frame_level_outputs = big_frame_level_rnn:forward(big_frames)[1]                  
         end        
 
         if (t-1) % frame_size == 0 then
@@ -417,7 +485,7 @@ function sample(net,filepath)
         sample = torch.multinomial(sample:squeeze(),1)
 
         samples[{{},1,t}] = sample:typeAs(samples)
-
+        
         xlua.progress(t-big_frame_size,sample_length-big_frame_size)
     end
 
@@ -434,6 +502,13 @@ function sample(net,filepath)
     net:training()
 end
 
-local files = get_files(data_path)
-local net = create_samplernn() -- torch.load("net.t7")
-train(net, files)
+--[[local files = get_files(data_path)
+local net = create_samplernn()--torch.load("net.t7")
+train(net,files)]]--
+
+local net = create_samplernn()
+local param,dparam=net:getParameters()
+param:copy(torch.load("params.t7"))
+net:syncParameters()
+path.mkdir("samples/1/")
+sample(getSingleModel(net),'samples/1/sample.wav')
