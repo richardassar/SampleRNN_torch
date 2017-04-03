@@ -1,9 +1,11 @@
 local LinearWeightNorm, parent = torch.class('nn.LinearWeightNorm', 'nn.Linear')
 
-function LinearWeightNorm:__init(inputSize, outputSize, bias)
+function LinearWeightNorm:__init(inputSize, outputSize, bias, eps)
     nn.Module.__init(self) -- Skip nn.Linear constructor
 
     local bias = ((bias == nil) and true) or bias
+
+    self.eps = eps or 1e-16
 
     self.outputSize = outputSize
     self.inputSize = inputSize
@@ -27,11 +29,21 @@ function LinearWeightNorm:__init(inputSize, outputSize, bias)
     self:reset() 
 end
 
+function LinearWeightNorm:initFromWeight(weight)
+    weight = weight or self.weight
+
+    self.g = weight:norm(2,2):add(self.eps)
+    self.v:copy(weight)
+
+    self.dirty = true
+
+    return self
+end
+
 function LinearWeightNorm.fromLinear(linear)
     local module = nn.LinearWeightNorm(linear.weight:size(2), linear.weight:size(1), linear.bias)
     
-    module.g = linear.weight:norm(2,2)
-    module.v = torch.cdiv(linear.weight, module.g:expandAs(linear.weight))
+    module:initFromWeight(linear.weight)
 
     if linear.bias then
         module.bias:copy(linear.bias)
@@ -68,14 +80,12 @@ function LinearWeightNorm:reset(stdv)
         stdv = 1 / math.sqrt(self.inputSize)
     end
 
-    self.v:uniform(-stdv,stdv)
-    self.g:norm(self.v,2,2)
-
+    self.weight:uniform(-stdv,stdv)
+    self:initFromWeight()
+    
     if self.bias then 
         self.bias:uniform(-stdv, stdv)
     end
-
-    self.dirty = true
 end
 
 local function updateAddBuffer(self, input)
@@ -92,7 +102,7 @@ function LinearWeightNorm:updateWeightMatrix()
         if self.scale:dim() == 0 then self.scale:resizeAs(self.g) end
         if self.weight:dim() == 0 then self.weight:resizeAs(self.v) end
 
-        self.norm:norm(self.v,2,2)
+        self.norm:norm(self.v,2,2):add(self.eps)
         self.scale:copy(self.g):cdiv(self.norm)
         self.weight:copy(self.v):cmul(self.scale:expandAs(self.v))
         
