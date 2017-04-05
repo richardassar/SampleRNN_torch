@@ -2,13 +2,12 @@ require 'audio'
 require 'xlua'
 
 local cmd = torch.CmdLine()
-
 cmd:text('generate_dataset.lua options:')
 cmd:option('-source_path','','NCCL is enabled')
 cmd:option('-dest_path','','Resumes a previous training run if true')
 cmd:option('-seg_len',8,'The length in seconds of each audio segment')
-local args = cmd:parse(arg)
 
+local args = cmd:parse(arg)
 assert(args.source_path:len() > 0, "source_path must be provided")
 assert(args.dest_path:len() > 0, "dest_path must be provided")
 assert(args.seg_len > 0, "seg_len must be positive")
