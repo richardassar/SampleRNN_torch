@@ -20,7 +20,7 @@ local grads = torch.load(session_path..'/gradNorms.t7')
 
 local audio_data_path = 'datasets/'..session.dataset..'/data'
 local aud,sample_rate = audio.load(audio_data_path..'/p0001.wav')
-local n_tsteps = aud:size(1) / session.seq_len - 1
+local n_tsteps = math.floor((aud:size(1) - session.big_frame_size) / session.seq_len)
 
 print(#losses..' iterations')
 
@@ -43,7 +43,7 @@ loss_max = lossesTensor:view(-1,n_tsteps):max(2)
 local loss_min = lossesTensor:view(-1,n_tsteps):min(2)
 local loss_mean = lossesTensor:view(-1,n_tsteps):mean(2)
 
-gnuplot.pdffigure(session_path..'/plots/loss_curve_range.pdf')
+gnuplot.pdffigure(session_path..'/plots/loss_curve.pdf')
 gnuplot.raw('set size rectangle')
 gnuplot.raw('set xlabel "minibatches"') 
 gnuplot.raw('set ylabel "NLL (bits)"') 

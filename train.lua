@@ -62,7 +62,7 @@ cmd:option('-sampling_temperature',1,'The sampling temperature')
 cmd:text('')
 
 cmd:text('Model configuration:')
-cmd:option('-cudnn_rnn',false,'Enables CUDNN for the RNN modules')
+cmd:option('-cudnn_rnn',true,'Enables CUDNN for the RNN modules, when disabled a weight normalized version of SeqGRU is used')
 cmd:option('-q_levels',256,'The number of quantization levels to use')
 cmd:option('-embedding_size',256,'The dimension of the embedding vectors')
 cmd:option('-big_frame_size',8,'The context size for the topmost tier RNN')
@@ -78,6 +78,7 @@ cmd:option('-learning_rate',0.001,'The learning rate to use')
 cmd:option('-max_grad',1,'The per-dimension gradient clipping threshold')
 cmd:option('-seq_len',512,'The number of TBPTT steps')
 cmd:option('-minibatch_size',128,'Specifies the minibatch size to use')
+cmd:option('-max_epoch',math.huge,'The maximum number of training epochs to perform')
 cmd:text('')
 
 local args = cmd:parse(arg)
@@ -400,8 +401,8 @@ function train(net, files)
 
     local thread_pool = create_thread_pool(n_threads)
     
-    local epoch = 0
-    while true do -- TODO: maxepoch?
+    local n_epoch = 0
+    while n_epoch < args.max_epoch do
         local shuffled_files = torch.randperm(#files):long()
         local max_batches = math.floor(#files / minibatch_size)
 
@@ -518,8 +519,8 @@ function train(net, files)
             n_batch = n_batch + 1
         end
 
-        epoch = epoch + 1
-        print('Epoch: '..epoch..', avg_loss = '..(epoch_err / (n_batch * n_tbptt)))
+        n_epoch = n_epoch + 1
+        print('Epoch: '..n_epoch..', avg_loss = '..(epoch_err / (n_batch * n_tbptt)))
 
         if args.sample_every_epoch then
             sample(net, #losses)
