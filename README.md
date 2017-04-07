@@ -54,6 +54,6 @@ More models will be uploaded soon.
 
 ## Theano version
 
-This code is based on the reference implementation in Theano by [Soroush Mehri](https://github.com/soroushmehr).
+This code is based on the reference implementation in Theano.
 
 https://github.com/soroushmehr/sampleRNN_ICLR2017
