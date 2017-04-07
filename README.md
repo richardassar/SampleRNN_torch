@@ -51,3 +51,9 @@ Multiple samples are generated in batch mode for efficiency, however generating 
 A pretrained model of the *piano* dataset is available [here](https://drive.google.com/uc?id=0B5pXFO5X-KJ9Mko3MUZuLUpEQVU&export=download). Download and copy it into your `sessions/` directory and then extract it in place.
 
 More models will be uploaded soon.
+
+## Theano version
+
+This code is based on the reference implementation in Theano by [Soroush Mehri](https://github.com/soroushmehr).
+
+https://github.com/soroushmehr/sampleRNN_ICLR2017
