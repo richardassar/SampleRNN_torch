@@ -5,8 +5,7 @@ wget "https://archive.org/compress/213PartitaNo.2Chaconne/formats=OGG%20VORBIS&f
 wget "https://archive.org/compress/110SonateNo.3EnUtMajeurPour/formats=OGG%20VORBIS&file=/110SonateNo.3EnUtMajeurPour.zip"
 unzip \*.zip
 rm *.zip
-mv */*.ogg .
-for file in *.ogg; do ffmpeg -y -i "$file" -ac 1 -ar 22050 "${file%.ogg}.wav" && rm "$file"; done
+for file in *.ogg; do ffmpeg -y -i "$file" -ac 1 -ar 16000 "${file%.ogg}.wav" && rm "$file"; done
 cd ..
 mkdir data/
 th ../../scripts/generate_dataset.lua -source_path source/ -dest_path data/

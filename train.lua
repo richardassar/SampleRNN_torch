@@ -62,7 +62,7 @@ cmd:option('-sampling_temperature',1,'The sampling temperature')
 cmd:text('')
 
 cmd:text('Model configuration:')
-cmd:option('-cudnn_rnn',true,'Enables CUDNN for the RNN modules, when disabled a weight normalized version of SeqGRU is used')
+cmd:option('-cudnn_rnn',false,'Enables CUDNN for the RNN modules, when disabled a weight normalized version of SeqGRU is used')
 cmd:option('-q_levels',256,'The number of quantization levels to use')
 cmd:option('-embedding_size',256,'The dimension of the embedding vectors')
 cmd:option('-big_frame_size',8,'The context size for the topmost tier RNN')
