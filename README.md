@@ -21,6 +21,8 @@ The following packages are required to run SampleRNN_torch:
 - xlua
 - gnuplot
 
+**NOTE**: Update `nn` and `cudnn` even if they were already installed as fixes have been submitted which affect this project.
+
 ## Datasets
 
 To retrieve and prepare the *piano* dataset, as used in the reference implementation, run:
