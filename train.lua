@@ -392,7 +392,7 @@ function train(net, files)
 
     local param,dparam = net:getParameters()
     if args.resume then param:copy(torch.load(session_path..'/params.t7')) end
-    net:syncParameters()
+    if multigpu then net:syncParameters() end
 
     local optim_state = args.resume and torch.load(session_path..'/optim_state.t7') or {learningRate = learning_rate}
 
@@ -450,7 +450,7 @@ function train(net, files)
                 function feval(x)
                     if x ~= param then
                         param:copy(x)
-                        net:syncParameters()
+                        if multigpu then net:syncParameters() end
                     end
 
                     net:zeroGradParameters()
