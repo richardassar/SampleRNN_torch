@@ -3,8 +3,8 @@ require 'xlua'
 
 local cmd = torch.CmdLine()
 cmd:text('generate_dataset.lua options:')
-cmd:option('-source_path','','NCCL is enabled')
-cmd:option('-dest_path','','Resumes a previous training run if true')
+cmd:option('-source_path','','The path containing source audio')
+cmd:option('-dest_path','','Where to store the audio segments')
 cmd:option('-seg_len',8,'The length in seconds of each audio segment')
 
 local args = cmd:parse(arg)
