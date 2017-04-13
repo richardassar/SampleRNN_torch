@@ -33,9 +33,7 @@ for i,filepath in pairs(files) do
 	assert(sample_rate_check == nil or sample_rate_check == sample_rate, "Sample rate mismatch")
 	sample_rate_check = sample_rate
 
-	if aud:size(2) > 1 then
-		aud = aud:sum(2) -- Mix stereo channels
-	end
+	aud = aud:sum(2) -- Mix stereo channels
 	aud = aud:view(-1)
 	aud:csub(aud:mean()) -- Remove DC component
 	aud:div(math.max(math.abs(aud:min()),aud:max())+1e-16) -- Normalize to abs-max amplitude
