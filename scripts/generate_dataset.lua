@@ -22,7 +22,7 @@ function get_files(path)
 end
 
 print("Generating training set from '"..args.source_path.."'")
-local files = get_files("source")
+local files = get_files(args.source_path)
 
 local idx = 1
 local sample_rate_check
