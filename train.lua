@@ -31,6 +31,7 @@ require 'optim'
 require 'audio'
 require 'xlua'
 require 'SeqGRU_WN'
+require 'utils'
 
 local threads = require 'threads'
 threads.serialization('threads.sharedserialize')
@@ -63,7 +64,9 @@ cmd:text('')
 
 cmd:text('Model configuration:')
 cmd:option('-cudnn_rnn',false,'Enables CUDNN for the RNN modules, when disabled a weight normalized version of SeqGRU is used')
-cmd:option('-q_levels',256,'The number of quantization levels to use')
+cmd:option('-q_levels',256,'The number of quantization levels')
+cmd:option('-q_type','linear','linear | mu-law - The quantization scheme')
+cmd:option('-norm_type','min-max','min-max | abs-max | none - The normalization scheme')
 cmd:option('-embedding_size',256,'The dimension of the embedding vectors')
 cmd:option('-big_frame_size',8,'The context size for the topmost tier RNN')
 cmd:option('-frame_size',2,'The context size for the intermediate tier RNN')
@@ -83,7 +86,7 @@ cmd:text('')
 
 local args = cmd:parse(arg)
 
-local session_args = {'dataset','cudnn_rnn','q_levels','embedding_size','big_frame_size','frame_size','hidden_dim','linear_type','dropout','learning_rate','max_grad','seq_len','minibatch_size'}
+local session_args = {'dataset','cudnn_rnn','q_levels','q_type','norm_type','embedding_size','big_frame_size','frame_size','hidden_dim','linear_type','dropout','learning_rate','max_grad','seq_len','minibatch_size'}
 
 local session_path = 'sessions/'..args.session
 
@@ -132,6 +135,8 @@ local big_dim = args.hidden_dim
 local dim = big_dim
 local q_levels = args.q_levels
 local q_zero = math.floor(q_levels / 2)
+local q_type = args.q_type
+local norm_type = args.norm_type
 local emb_size = args.embedding_size
 local dropout = args.dropout
 
@@ -314,6 +319,7 @@ function create_thread_pool(n_threads)
         n_threads,
         function(threadId)
             local audio = require 'audio'
+            require 'utils'
         end,
         function()
             function load(path)
@@ -322,14 +328,33 @@ function create_thread_pool(n_threads)
                 assert(aud:size(2) == 1, 'Only mono training data is supported')
                 aud = aud:view(-1)
 
-                aud:csub(aud:min())
-                aud:div(aud:max()+1e-16)                                
+                if norm_type == 'none' then
+                    aud:csub(-0x80000000)
+                    aud:div(0xFFFF0000)
+                elseif norm_type == 'abs-max' then
+                    aud:csub(-0x80000000)
+                    aud:div(0xFFFF0000)
+                    aud:mul(2)
+                    aud:csub(1)
+                    aud:div(math.max(math.abs(aud:min()),aud:max())+1e-16)
+                    aud:add(1)
+                    aud:div(2)
+                elseif norm_type == 'min-max' then
+                    aud:csub(aud:min())
+                    aud:div(aud:max()+1e-16)
+                end
 
-                local eps = 1e-5
-                aud:mul(q_levels - eps)
-                aud:add(eps / 2)
-                aud:floor()
-                aud:add(1)
+                if q_type == 'mu-law' then
+                    aud:mul(2)
+                    aud:csub(1)
+                    aud = linear2mu(aud) + 1
+                elseif q_type == 'linear' then
+                    local eps = 1e-5
+                    aud:mul(q_levels - eps)
+                    aud:add(eps / 2)
+                    aud:floor()
+                    aud:add(1)
+                end
                 
                 return aud
             end
@@ -347,11 +372,14 @@ function make_minibatch(thread_pool, files, indices, start, stop)
         local file_path = files[indices[i]]
 
         thread_pool:addjob(
-            function(f)            
-                return load(f)
+            function(file_path)
+                local aud = load(file_path)
+                collectgarbage()
+
+                return aud
             end,
-            function(k)
-                dat[{j,{1,k:size(1)}}] = k                            
+            function(aud)
+                dat[{j,{1,aud:size(1)}}] = aud
                 j = j + 1                
             end,
             file_path
@@ -589,7 +617,15 @@ function generate_samples(net,filepath)
     local sampling_stop_time = sys.clock()
     print('Generated '..(sample_length / sample_rate * n_samples)..' seconds of audio in '..(sampling_stop_time - sampling_start_time)..' seconds.')
 
-    local audioOut = -0x80000000 + 0xFFFF0000 * (samples - 1) / (q_levels - 1)
+    if q_type == 'mu-law' then
+        samples = mu2linear(samples - 1)
+        samples:add(1)
+        samples:div(2)
+    elseif q_type == 'linear' then
+        samples = (samples - 1) / (q_levels - 1)
+    end
+
+    local audioOut = -0x80000000 + 0xFFFF0000 * samples
     for i=1,audioOut:size(1) do
         audio.save(filepath..'/'..string.format('%d.wav',i), audioOut:select(1,i):t():double(), sample_rate)
     end

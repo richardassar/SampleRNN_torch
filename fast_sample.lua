@@ -27,6 +27,7 @@ require 'cudnn'
 require 'audio'
 require 'LinearWeightNorm' -- https://github.com/torch/nn/pull/1162
 require 'SeqGRU_WN'
+require 'utils'
 
 --
 local cmd = torch.CmdLine()
@@ -67,6 +68,7 @@ local big_dim = args.hidden_dim
 local dim = big_dim
 local q_levels = args.q_levels
 local q_zero = math.floor(q_levels / 2)
+local q_type = args.q_type or 'linear'
 local emb_size = args.embedding_size
 local dropout = args.dropout
 
@@ -183,7 +185,7 @@ function sample()
     local samples = torch.CudaTensor(sample_length):fill(0)
     local big_frame_level_outputs, frame_level_outputs
 
-    samples[{{1,big_frame_size}}] = math.floor(q_levels / 2)
+    samples[{{1,big_frame_size}}] = q_zero
 
     local start_time = sys.clock()
     for t = big_frame_size + 1, sample_length do
@@ -217,7 +219,15 @@ function sample()
 
     print("Generated "..(sample_length / sample_rate).." seconds of audio in "..(stop_time - start_time).." seconds.")
 
-    local audioOut = -0x80000000 + 0xFFFF0000 * (samples - 1) / (q_levels - 1)
+    if q_type == 'mu-law' then
+        samples = mu2linear(samples - 1)
+        samples:add(1)
+        samples:div(2)
+    elseif q_type == 'linear' then
+        samples = (samples - 1) / (q_levels - 1)
+    end
+
+    local audioOut = -0x80000000 + 0xFFFF0000 * samples
     audio.save(output_path, audioOut:view(-1,1):double(), sample_rate)
 end
 
