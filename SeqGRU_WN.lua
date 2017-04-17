@@ -22,6 +22,8 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 --]]
 
+-- Modified by Richard Assar
+
 require 'torch'
 require 'nn'
 
@@ -385,7 +387,6 @@ function SeqGRU_WN:backward(input, gradOutput, scale)
     
     -- We will use grad_au as temporary buffer
     -- to compute grad_ahc.
-
     local grad_hc = grad_au:fill(0):addcmul(grad_next_h, -1, u, grad_next_h)
     grad_ahc:fill(1):addcmul(-1, hc,hc):cmul(grad_hc)
     local grad_r = grad_au:fill(0):addmm(grad_ahc, Wh[{{}, {2 * H + 1, 3 * H}}]:t() ):cmul(prev_h)
@@ -395,7 +396,7 @@ function SeqGRU_WN:backward(input, gradOutput, scale)
     grad_au:fill(1):add(-1, u):cmul(u):cmul(temp_buffer):cmul(grad_next_h)
     grad_x[t]:mm(grad_a, Wx:t())
 
-    local dWx = self.buffer4:resize(x[t]:t():size(1), grad_a:size(2)):mm(x[t]:t(), grad_a)--:mul(scale)
+    local dWx = self.buffer4:resize(x[t]:t():size(1), grad_a:size(2)):mm(x[t]:t(), grad_a)
     grad_Wx:copy(dWx):cmul(Vx):cdiv(norm_x)
 
     local dGradGx = self.buffer7:resize(1,grad_Wx:size(2)):sum(grad_Wx,1)
@@ -410,14 +411,14 @@ function SeqGRU_WN:backward(input, gradOutput, scale)
 
     grad_Vx:add(dWx)
 
-    local dWh = self.buffer5:resize(prev_h:t():size(1),grad_a[{{}, {1, 2 * H}}]:size(2)):mm(prev_h:t(), grad_a[{{}, {1, 2 * H}}])--:mul(scale)
+    local dWh = self.buffer5:resize(prev_h:t():size(1),grad_a[{{}, {1, 2 * H}}]:size(2)):mm(prev_h:t(), grad_a[{{}, {1, 2 * H}}])
     grad_Wh[{{}, {1, 2 * H}}]:copy(dWh)
     
     local grad_a_sum = self.buffer3:resize(H):sum(grad_a, 1)
     grad_b:add(scale, grad_a_sum)
     temp_buffer:fill(0):add(prev_h):cmul(r)
 
-    local dWh = self.buffer6:resize(temp_buffer:t():size(1),grad_ahc:size(2)):mm(temp_buffer:t(), grad_ahc)--:mul(scale)
+    local dWh = self.buffer6:resize(temp_buffer:t():size(1),grad_ahc:size(2)):mm(temp_buffer:t(), grad_ahc)
     grad_Wh[{{}, {2 * H + 1, 3 * H}}]:copy(dWh)
 
     self.hTmp:copy(grad_Wh):cmul(Vh):cdiv(norm_h)
@@ -538,6 +539,8 @@ function SeqGRU_WN:evaluate()
 end
 
 function SeqGRU_WN:toGRU()
+  self:updateWeightMatrix()
+
   local D, H = self.inputSize, self.outputSize
 
   local Wx = self.weight[{{1, D}}]

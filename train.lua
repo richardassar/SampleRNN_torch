@@ -31,6 +31,8 @@ require 'optim'
 require 'audio'
 require 'xlua'
 require 'SeqGRU_WN'
+require 'SeqLSTM_WN'
+require 'SeqLSTMP_WN'
 require 'utils'
 
 local threads = require 'threads'
@@ -64,6 +66,7 @@ cmd:text('')
 
 cmd:text('Model configuration:')
 cmd:option('-cudnn_rnn',false,'Enables CUDNN for the RNN modules, when disabled a weight normalized version of SeqGRU is used')
+cmd:option('-rnn_type','GRU','GRU | LSTM | LSTMP - Selects GRU, LSTM or LSTM with peephole connections as the RNN type')
 cmd:option('-q_levels',256,'The number of quantization levels')
 cmd:option('-q_type','linear','linear | mu-law - The quantization scheme')
 cmd:option('-norm_type','min-max','min-max | abs-max | none - The normalization scheme')
@@ -86,7 +89,7 @@ cmd:text('')
 
 local args = cmd:parse(arg)
 
-local session_args = {'dataset','cudnn_rnn','q_levels','q_type','norm_type','embedding_size','big_frame_size','frame_size','hidden_dim','linear_type','dropout','learning_rate','max_grad','seq_len','minibatch_size'}
+local session_args = {'dataset','cudnn_rnn','rnn_type','q_levels','q_type','norm_type','embedding_size','big_frame_size','frame_size','hidden_dim','linear_type','dropout','learning_rate','max_grad','seq_len','minibatch_size'}
 
 local session_path = 'sessions/'..args.session
 
@@ -101,7 +104,9 @@ else
     assert(args.dataset:len() > 0, 'dataset must be provided')
     assert(args.linear_type == 'WN' or args.linear_type == 'default', 'linear_type must be "WN" or "default"')
     assert(args.q_type == 'mu-law' or args.q_type == 'linear', 'q_type must be "mu-law" or "linear"')
-    assert(args.norm_type == 'min-max' or args.norm_type == 'abs-max' or args.norm_type == 'none', 'norm_type must be "min-max" or "abs-max" or "none"')
+    assert(args.norm_type == 'min-max' or args.norm_type == 'abs-max' or args.norm_type == 'none', 'norm_type must be "min-max", "abs-max" or "none"')
+    assert(args.rnn_type == 'GRU' or args.rnn_type == 'LSTM' or args.rnn_type == 'LSTMP', 'rnn_type must be "GRU", "LSTM" or "LSTMP"')
+    assert(not args.cudnn_rnn and args.rnn_type == 'LSTMP', 'Peephole connections are not supported in the CUDNN LSTM')
 
     path.mkdir('sessions/')
     path.mkdir(session_path)
@@ -118,8 +123,6 @@ local audio_data_path = 'datasets/'..args.dataset..'/data'
 local aud,sample_rate = audio.load(audio_data_path..'/p0001.wav')
 local seg_len = aud:size(1)
 
-local linear_type = args.linear_type
-local cudnn_rnn = args.cudnn_rnn
 local use_nccl = args.use_nccl
 local multigpu = args.multigpu
 
@@ -131,6 +134,9 @@ local max_grad = args.max_grad
 
 local seq_len = args.seq_len
 
+local linear_type = args.linear_type
+local cudnn_rnn = args.cudnn_rnn
+local rnn_type = args.rnn_type
 local big_frame_size = args.big_frame_size
 local frame_size = args.frame_size
 local big_dim = args.hidden_dim
@@ -149,11 +155,11 @@ local sampling_temperature = args.sampling_temperature
 function create_samplernn()
     local big_rnn, frame_rnn
     if cudnn_rnn then
-        big_rnn = cudnn.GRU(big_frame_size, big_dim, 1, true, dropout, true)
-        frame_rnn = cudnn.GRU(dim, dim, 1, true, dropout, true)
+        big_rnn = cudnn[rnn_type](big_frame_size, big_dim, 1, true, dropout, true)
+        frame_rnn = cudnn[rnn_type](dim, dim, 1, true, dropout, true)
     else 
-        big_rnn = nn.SeqGRU_WN(big_frame_size, big_dim)
-        frame_rnn = nn.SeqGRU_WN(dim, dim)
+        big_rnn = nn['Seq'..rnn_type..'_WN'](big_frame_size, big_dim)
+        frame_rnn = nn['Seq'..rnn_type..'_WN'](dim, dim)
 
         big_rnn:remember('both')
         frame_rnn:remember('both')
@@ -244,53 +250,98 @@ function create_samplernn()
     end
 
     if cudnn_rnn then
-        local rnns = net:findModules('cudnn.GRU')
-        for _,gru in pairs(rnns) do
-            local biases = gru:biases()[1]
-            for k,v in pairs(biases) do
-                v:zero()
+        if rnn_type == 'GRU' then
+            local rnns = net:findModules('cudnn.GRU')
+            for _,gru in pairs(rnns) do
+                local biases = gru:biases()[1]
+                for k,v in pairs(biases) do
+                    v:zero()
+                end
+
+                local weights = gru:weights()[1]
+
+                local stdv = math.sqrt(1 / gru.inputSize) * math.sqrt(3) -- 'LeCunn' initialization
+                weights[1]:uniform(-stdv, stdv) 
+                weights[2]:uniform(-stdv, stdv) 
+                weights[3]:uniform(-stdv, stdv)
+
+                stdv = math.sqrt(1 / gru.hiddenSize) * math.sqrt(3)
+                weights[4]:uniform(-stdv, stdv) 
+                weights[5]:uniform(-stdv, stdv) 
+                
+                function ortho(inputDim,outputDim)
+                    local rand = torch.randn(outputDim,inputDim)
+                    local q,r = torch.qr(rand)
+                    return q
+                end
+
+                weights[6]:view(gru.hiddenSize,gru.hiddenSize):copy(ortho(gru.hiddenSize,gru.hiddenSize)) -- Ortho initialization
             end
+        elseif rnn_type == 'LSTM' then
+            local rnns = net:findModules('cudnn.LSTM')
+            for _,lstm in pairs(rnns) do
+                local biases = lstm:biases()[1]
+                for k,v in pairs(biases) do
+                    v:zero()
+                end
 
-            local weights = gru:weights()[1]
+                biases[2]:fill(3)
 
-            local stdv = math.sqrt(1 / gru.inputSize) * math.sqrt(3) -- 'LeCunn' initialization
-            weights[1]:uniform(-stdv, stdv) 
-            weights[2]:uniform(-stdv, stdv) 
-            weights[3]:uniform(-stdv, stdv)
+                local weights = lstm:weights()[1]
 
-            stdv = math.sqrt(1 / gru.hiddenSize) * math.sqrt(3)
-            weights[4]:uniform(-stdv, stdv) 
-            weights[5]:uniform(-stdv, stdv) 
-            
-            function ortho(inputDim,outputDim)
-                local rand = torch.randn(outputDim,inputDim)
-                local q,r = torch.qr(rand)
-                return q
+                local stdv = math.sqrt(1 / lstm.inputSize) * math.sqrt(3) -- 'LeCunn' initialization
+                weights[1]:uniform(-stdv, stdv) 
+                weights[2]:uniform(-stdv, stdv) 
+                weights[3]:uniform(-stdv, stdv)
+                weights[4]:uniform(-stdv, stdv)
+
+                stdv = math.sqrt(1 / lstm.hiddenSize) * math.sqrt(3)
+                weights[5]:uniform(-stdv, stdv) 
+                weights[6]:uniform(-stdv, stdv) 
+                weights[7]:uniform(-stdv, stdv)
+                weights[8]:uniform(-stdv, stdv)
             end
-
-            weights[6]:view(gru.hiddenSize,gru.hiddenSize):copy(ortho(gru.hiddenSize,gru.hiddenSize)) -- Ortho initialization
         end
     else
-        local rnns = net:findModules('nn.SeqGRU_WN')
-        for _,gru in pairs(rnns) do
-            gru.bias:zero()
+        if rnn_type == 'GRU' then
+            local rnns = net:findModules('nn.SeqGRU_WN')
+            for _,gru in pairs(rnns) do
+                local D, H = gru.inputSize, gru.outputSize
 
-            local D, H = gru.inputSize, gru.outputSize
-            
-            local stdv = math.sqrt(1 / D) * math.sqrt(3) -- 'LeCunn' initialization
-            gru.weight[{{1,D}}]:uniform(-stdv, stdv)
-            
-            stdv = math.sqrt(1 / H) * math.sqrt(3)
-            gru.weight[{{D+1,D+H},{1,2*H}}]:uniform(-stdv, stdv)
-            
-            function ortho(inputDim,outputDim)
-                local rand = torch.randn(outputDim,inputDim)
-                local q,r = torch.qr(rand)
-                return q
+                gru.bias:zero()
+                
+                local stdv = math.sqrt(1 / D) * math.sqrt(3) -- 'LeCunn' initialization
+                gru.weight[{{1,D}}]:uniform(-stdv, stdv)
+                
+                stdv = math.sqrt(1 / H) * math.sqrt(3)
+                gru.weight[{{D+1,D+H},{1,2*H}}]:uniform(-stdv, stdv)
+                
+                function ortho(inputDim,outputDim)
+                    local rand = torch.randn(outputDim,inputDim)
+                    local q,r = torch.qr(rand)
+                    return q
+                end
+
+                gru.weight[{{D+1,D+H},{2*H+1,3*H}}]:copy(ortho(H,H)) -- Ortho initialization
+                gru:initFromWeight()
             end
+        elseif rnn_type == 'LSTM' or rnn_type == 'LSTMP' then
+            local rnns = net:findModules('nn.Seq'..rnn_type..'_WN')
+            for _,lstm in pairs(rnns) do
+                local D, H = lstm.inputsize, lstm.outputsize
 
-            gru.weight[{{D+1,D+H},{2*H+1,3*H}}]:copy(ortho(H,H)) -- Ortho initialization
-            gru:initFromWeight()
+                lstm.bias:zero()
+                lstm.bias[{{H + 1, 2 * H}}]:fill(3)
+                
+                local stdv = math.sqrt(1 / D) * math.sqrt(3) -- 'LeCunn' initialization
+                lstm.weight[{{1,D}}]:uniform(-stdv, stdv)
+                
+                stdv = math.sqrt(1 / H) * math.sqrt(3)
+                lstm.weight[{{D+1,D+H}}]:uniform(-stdv, stdv)                
+                lstm.weightO:uniform(-stdv, stdv)
+                                
+                lstm:initFromWeight()
+            end
         end
     end
 
@@ -301,6 +352,8 @@ function create_samplernn()
             require 'rnn'
             require 'LinearWeightNorm'
             require 'SeqGRU_WN'
+            require 'SeqLSTM_WN'
+            require 'SeqLSTMP_WN'
         end):cuda()
     end
 
@@ -393,18 +446,19 @@ function make_minibatch(thread_pool, files, indices, start, stop)
     return dat
 end
 
-cudnn.GRU.forget = cudnn.GRU.resetStates
+cudnn.RNN.forget = cudnn.RNN.resetStates
 
 function resetStates(model)
+    local rnn_lookup = cudnn_rnn and ('cudnn.'..rnn_type) or ('nn.Seq'..rnn_type..'_WN')
     if model.impl then
         model.impl:exec(function(m)
-            local rnns = m:findModules(cudnn_rnn and 'cudnn.GRU' or 'nn.SeqGRU_WN')
+            local rnns = m:findModules(rnn_lookup)
             for i=1,#rnns do
                 rnns[i]:forget()
             end
         end)
     else
-        local rnns = model:findModules(cudnn_rnn and 'cudnn.GRU' or 'nn.SeqGRU_WN')
+        local rnns = model:findModules(rnn_lookup)
         for i=1,#rnns do
             rnns[i]:forget()
         end

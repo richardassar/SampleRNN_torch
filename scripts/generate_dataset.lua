@@ -36,7 +36,7 @@ for i,filepath in pairs(files) do
 	aud = aud:sum(2) -- Mix stereo channels
 	aud = aud:view(-1)
 	aud:csub(aud:mean()) -- Remove DC component
-	aud:div(math.max(math.abs(aud:min()),aud:max())+1e-16) -- Normalize to abs-max amplitude
+	aud:div(math.max(math.abs(aud:min()),aud:max())) -- Normalize to abs-max amplitude
 	aud:add(1) -- Scale to [0,1]
 	aud:div(2)
 

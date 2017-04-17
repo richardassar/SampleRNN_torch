@@ -27,6 +27,8 @@ require 'cudnn'
 require 'audio'
 require 'LinearWeightNorm' -- https://github.com/torch/nn/pull/1162
 require 'SeqGRU_WN'
+require 'SeqLSTM_WN'
+require 'SeqLSTMP_WN'
 require 'utils'
 
 --
@@ -61,7 +63,7 @@ end
 --
 local linear_type = args.linear_type
 local cudnn_rnn = args.cudnn_rnn
-
+local rnn_type = args.rnn_type
 local big_frame_size = args.big_frame_size
 local frame_size = args.frame_size
 local big_dim = args.hidden_dim
@@ -83,11 +85,11 @@ local output_path = args.output_path
 --
 local big_rnn, frame_rnn
 if cudnn_rnn then
-    big_rnn = cudnn.GRU(big_frame_size, big_dim, 1, false, dropout, true)
-    frame_rnn = cudnn.GRU(dim, dim, 1, false, dropout, true)
+    big_rnn = cudnn[rnn_type](big_frame_size, big_dim, 1, true, dropout, true)
+    frame_rnn = cudnn[rnn_type](dim, dim, 1, true, dropout, true)
 else 
-    big_rnn = nn.SeqGRU_WN(big_frame_size, big_dim)
-    frame_rnn = nn.SeqGRU_WN(dim, dim)
+    big_rnn = nn['Seq'..rnn_type..'_WN'](big_frame_size, big_dim)
+    frame_rnn = nn['Seq'..rnn_type..'_WN'](dim, dim)
 
     big_rnn:remember('both')
     frame_rnn:remember('both')
@@ -167,10 +169,11 @@ local net = nn.Sequential()
 local param,dparam = net:getParameters()
 param:copy(torch.load(session_path.."/params.t7"))
 
-cudnn.GRU.forget = cudnn.GRU.resetStates
+cudnn.RNN.forget = cudnn.RNN.resetStates
 
 function resetStates()
-    local grus = net:findModules('cudnn.GRU')
+    local rnn_lookup = cudnn_rnn and ('cudnn.'..rnn_type) or ('nn.Seq'..rnn_type..'_WN')
+    local grus = net:findModules(rnn_lookup)
     for i=1,#grus do
         grus[i]:forget()
     end
