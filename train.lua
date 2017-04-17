@@ -100,6 +100,8 @@ else
     assert(args.session:len() > 0, 'session must be provided')
     assert(args.dataset:len() > 0, 'dataset must be provided')
     assert(args.linear_type == 'WN' or args.linear_type == 'default', 'linear_type must be "WN" or "default"')
+    assert(args.q_type == 'mu-law' or args.q_type == 'linear', 'q_type must be "mu-law" or "linear"')
+    assert(args.norm_type == 'min-max' or args.norm_type == 'abs-max' or args.norm_type == 'none', 'norm_type must be "min-max" or "abs-max" or "none"')
 
     path.mkdir('sessions/')
     path.mkdir(session_path)
@@ -336,12 +338,12 @@ function create_thread_pool(n_threads)
                     aud:div(0xFFFF0000)
                     aud:mul(2)
                     aud:csub(1)
-                    aud:div(math.max(math.abs(aud:min()),aud:max())+1e-16)
+                    aud:div(math.max(math.abs(aud:min()),aud:max()))
                     aud:add(1)
                     aud:div(2)
                 elseif norm_type == 'min-max' then
                     aud:csub(aud:min())
-                    aud:div(aud:max()+1e-16)
+                    aud:div(aud:max())
                 end
 
                 if q_type == 'mu-law' then
