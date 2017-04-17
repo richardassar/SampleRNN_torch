@@ -344,6 +344,8 @@ function create_thread_pool(n_threads)
                     aud:div(aud:max()+1e-16)
                 end
 
+                assert((q_type == 'mu-law') or (q_type == 'linear')), 'q_type must be \'mu-law\' or \'linear\'')
+                
                 if q_type == 'mu-law' then
                     aud:mul(2)
                     aud:csub(1)
