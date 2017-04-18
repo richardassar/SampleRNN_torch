@@ -106,7 +106,7 @@ else
     assert(args.q_type == 'mu-law' or args.q_type == 'linear', 'q_type must be "mu-law" or "linear"')
     assert(args.norm_type == 'min-max' or args.norm_type == 'abs-max' or args.norm_type == 'none', 'norm_type must be "min-max", "abs-max" or "none"')
     assert(args.rnn_type == 'GRU' or args.rnn_type == 'LSTM' or args.rnn_type == 'LSTMP', 'rnn_type must be "GRU", "LSTM" or "LSTMP"')
-    assert(not args.cudnn_rnn and args.rnn_type == 'LSTMP', 'Peephole connections are not supported in the CUDNN LSTM')
+    assert(not (args.cudnn_rnn and args.rnn_type == 'LSTMP'), 'Peephole connections are not supported in the CUDNN LSTM')
 
     path.mkdir('sessions/')
     path.mkdir(session_path)
