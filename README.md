@@ -32,7 +32,7 @@ cd datasets/piano/
 ./create_piano_dataset.sh
 ```
 
-The violin dataset preparation scripts are located in `datasets/violin/`.
+Other dataset preparation scripts may be found under `datasets/`.
 
 Custom datasets may be created by using `scripts/generate_dataset.lua` to slice multiple audio files into segments for training, audio must be placed in `datasets/[dataset]/data/`.
 
