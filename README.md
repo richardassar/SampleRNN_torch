@@ -29,7 +29,7 @@ To retrieve and prepare the *piano* dataset, as used in the reference implementa
 
 ```
 cd datasets/piano/
-./create_piano_dataset.sh
+./create_sdataset.sh
 ```
 
 Other dataset preparation scripts may be found under `datasets/`.
