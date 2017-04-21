@@ -6,7 +6,12 @@ A Torch implementation of [SampleRNN: An Unconditional End-to-End Neural Audio G
 
 ## Samples
 
-Sample output can be heard [here](https://soundcloud.com/psylent-v/sets/samplernn_torch). Feel free to submit links to any interesting samples you generate as a pull request.
+Listen to a selection of generated output at the following links:
+
+- [piano](https://soundcloud.com/psylent-v/sets/samplernn_torch)
+- [mozart](https://soundcloud.com/psylent-v/sets/samplernn_torch-mozart)
+
+Feel free to submit links to any interesting output you generate or dataset creation scripts as a pull request.
 
 ## Dependencies
 
