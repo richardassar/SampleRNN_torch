@@ -104,16 +104,11 @@ function SeqGRU_WN:initFromWeight(weight)
 
     local D, H = self.inputSize, self.outputSize
 
-    self.g[{{1}}] = weight[{{1,D}}]:norm(2,1):add(self.eps)
-    self.g[{{2}}] = weight[{{D+1,D+H}}]:norm(2,1):add(self.eps)
-
-    --self.v[{{1,D}}] = torch.cdiv(weight[{{1,D}}], self.g[{{1}}]:expandAs(weight[{{1,D}}]))
-    --self.v[{{D+1,D+H}}] = torch.cdiv(weight[{{D+1,D+H}}], self.g[{{2}}]:expandAs(weight[{{D+1,D+H}}]))
+    self.g[{{1}}] = weight[{{1,D}}]:norm(2,1):clamp(self.eps,math.huge)
+    self.g[{{2}}] = weight[{{D+1,D+H}}]:norm(2,1):clamp(self.eps,math.huge)
 
     self.v[{{1,D}}]:copy(weight[{{1,D}}])
     self.v[{{D+1,D+H}}]:copy(weight[{{D+1,D+H}}])
-
-    self.dirty = true
 
     return self
 end
@@ -193,19 +188,15 @@ function SeqGRU_WN:_prepare_size(input, gradOutput)
 end
 
 function SeqGRU_WN:updateWeightMatrix()
-    if self.dirty or self.train then
-        local H, D = self.outputSize, self.inputSize
+  local H, D = self.outputSize, self.inputSize
 
-        self.norm[{{1}}]:norm(self.v[{{1, D}}],2,1):add(self.eps)
-        self.norm[{{2}}]:norm(self.v[{{D + 1, D + H}}],2,1):add(self.eps)      
+  self.norm[{{1}}]:norm(self.v[{{1, D}}],2,1):clamp(self.eps,math.huge)
+  self.norm[{{2}}]:norm(self.v[{{D + 1, D + H}}],2,1):clamp(self.eps,math.huge)      
 
-        self.scale:copy(self.g):cdiv(self.norm)
+  self.scale:cdiv(self.g,self.norm)
 
-        self.weight[{{1, D}}]:copy(self.v[{{1, D}}]):cmul(self.scale[{{1}}]:expandAs(self.v[{{1, D}}]))
-        self.weight[{{D + 1, D + H}}]:copy(self.v[{{D + 1, D + H}}]):cmul(self.scale[{{2}}]:expandAs(self.v[{{D + 1, D + H}}]))
-
-        self.dirty = false
-    end
+  self.weight[{{1, D}}]:cmul(self.v[{{1, D}}],self.scale[{{1}}]:expandAs(self.v[{{1, D}}]))
+  self.weight[{{D + 1, D + H}}]:cmul(self.v[{{D + 1, D + H}}],self.scale[{{2}}]:expandAs(self.v[{{D + 1, D + H}}]))
 end
 
 --[[
@@ -220,7 +211,9 @@ Output:
 
 
 function SeqGRU_WN:updateOutput(input)
-  self:updateWeightMatrix()
+  if self.train ~= false then
+    self:updateWeightMatrix()
+  end
 
   self.recompute_backward = true
   local h0, x = self:_prepare_size(input)
@@ -397,14 +390,14 @@ function SeqGRU_WN:backward(input, gradOutput, scale)
     grad_x[t]:mm(grad_a, Wx:t())
 
     local dWx = self.buffer4:resize(x[t]:t():size(1), grad_a:size(2)):mm(x[t]:t(), grad_a)
-    grad_Wx:copy(dWx):cmul(Vx):cdiv(norm_x)
+    grad_Wx:cmul(dWx,Vx):cdiv(norm_x)
 
     local dGradGx = self.buffer7:resize(1,grad_Wx:size(2)):sum(grad_Wx,1)
     grad_Gx:add(dGradGx)
 
     dWx:cmul(scale_x)
 
-    grad_Wx:copy(Vx):cmul(scale_x):cdiv(norm_x)
+    grad_Wx:cmul(Vx,scale_x):cdiv(norm_x)
     grad_Wx:cmul(dGradGx:expandAs(grad_Wx))    
 
     dWx:add(-1,grad_Wx)
@@ -421,14 +414,14 @@ function SeqGRU_WN:backward(input, gradOutput, scale)
     local dWh = self.buffer6:resize(temp_buffer:t():size(1),grad_ahc:size(2)):mm(temp_buffer:t(), grad_ahc)
     grad_Wh[{{}, {2 * H + 1, 3 * H}}]:copy(dWh)
 
-    self.hTmp:copy(grad_Wh):cmul(Vh):cdiv(norm_h)
+    self.hTmp:cmul(grad_Wh,Vh):cdiv(norm_h)
 
     local dGradGh = self.buffer8:resize(1,self.hTmp:size(2)):sum(self.hTmp,1)
     grad_Gh:add(dGradGh)
     
     grad_Wh:cmul(scale_h)
 
-    self.hTmp:copy(Vh):cmul(scale_h):cdiv(norm_h)
+    self.hTmp:cmul(Vh,scale_h):cdiv(norm_h)
     self.hTmp:cmul(dGradGh:expandAs(self.hTmp))    
 
     grad_Wh:add(-1,self.hTmp)
@@ -455,8 +448,6 @@ function SeqGRU_WN:backward(input, gradOutput, scale)
   else
     self.gradInput = self.grad_x
   end
-
-  self.dirty = true
 
   return self.gradInput
 end
@@ -531,7 +522,8 @@ end
 
 function SeqGRU_WN:evaluate()
   if self.train ~= false then
-    -- forget at the start of each evaluation
+    self:updateWeightMatrix()
+    -- forget at the start of each evaluation    
     self:forget()
   end
   parent.evaluate(self)
@@ -576,7 +568,6 @@ function SeqGRU_WN:toGRU()
   
   return gru
 end
-
 
 function SeqGRU_WN:maskZero()
   self.maskzero = true

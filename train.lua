@@ -337,7 +337,9 @@ function create_samplernn()
                 
                 stdv = math.sqrt(1 / H) * math.sqrt(3)
                 lstm.weight[{{D+1,D+H}}]:uniform(-stdv, stdv)                
-                lstm.weightO:uniform(-stdv, stdv)
+                if rnn_type == 'LSTMP' then
+                    lstm.weightO:uniform(-stdv, stdv)
+                end
                                 
                 lstm:initFromWeight()
             end

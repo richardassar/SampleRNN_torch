@@ -106,13 +106,11 @@ function SeqLSTM_WN:initFromWeight(weight)
 
    local H, R, D = self.hiddensize, self.outputsize, self.inputsize
 
-   self.g[{{1}}] = weight[{{1,D}}]:norm(2,1):add(self.eps)
-   self.g[{{2}}] = weight[{{D+1,D+R}}]:norm(2,1):add(self.eps)
+   self.g[{{1}}] = weight[{{1,D}}]:norm(2,1):clamp(self.eps,math.huge)
+   self.g[{{2}}] = weight[{{D+1,D+R}}]:norm(2,1):clamp(self.eps,math.huge)
 
    self.v[{{1,D}}]:copy(weight[{{1,D}}])
    self.v[{{D+1,D+R}}]:copy(weight[{{D+1,D+R}}])
-
-   self.dirty = true
 
    return self
 end
@@ -198,20 +196,16 @@ function SeqLSTM_WN:_prepare_size(input, gradOutput)
    return c0, h0, x, gradOutput
 end
 
-function SeqLSTM_WN:updateWeightMatrix()
-   if self.dirty or self.train then
-      local H, R, D = self.hiddensize, self.outputsize, self.inputsize
+function SeqLSTM_WN:updateWeightMatrix()   
+   local H, R, D = self.hiddensize, self.outputsize, self.inputsize
 
-      self.norm[{{1}}]:norm(self.v[{{1, D}}],2,1):add(self.eps)
-      self.norm[{{2}}]:norm(self.v[{{D + 1, D + R}}],2,1):add(self.eps)      
+   self.norm[{{1}}]:norm(self.v[{{1, D}}],2,1):clamp(self.eps,math.huge)
+   self.norm[{{2}}]:norm(self.v[{{D + 1, D + R}}],2,1):clamp(self.eps,math.huge)
 
-      self.scale:copy(self.g):cdiv(self.norm)
+   self.scale:cdiv(self.g,self.norm)
 
-      self.weight[{{1, D}}]:copy(self.v[{{1, D}}]):cmul(self.scale[{{1}}]:expandAs(self.v[{{1, D}}]))
-      self.weight[{{D + 1, D + R}}]:copy(self.v[{{D + 1, D + R}}]):cmul(self.scale[{{2}}]:expandAs(self.v[{{D + 1, D + R}}]))
-
-      self.dirty = false
-   end
+   self.weight[{{1, D}}]:cmul(self.v[{{1, D}}],self.scale[{{1}}]:expandAs(self.v[{{1, D}}]))
+   self.weight[{{D + 1, D + R}}]:cmul(self.v[{{D + 1, D + R}}],self.scale[{{2}}]:expandAs(self.v[{{D + 1, D + R}}]))
 end
 
 --[[
@@ -225,7 +219,9 @@ Output:
 --]]
 
 function SeqLSTM_WN:updateOutput(input)
-   self:updateWeightMatrix()
+   if self.train ~= false then
+      self:updateWeightMatrix()
+   end
 
    self.recompute_backward = true
    local c0, h0, x = self:_prepare_size(input)
@@ -452,14 +448,14 @@ function SeqLSTM_WN:backward(input, gradOutput, scale)
       --
       local dWx = self.buffer4:resize(x[t]:t():size(1), grad_a:size(2)):mm(x[t]:t(), grad_a)
       
-      grad_Wx:copy(dWx):cmul(Vx):cdiv(norm_x)
+      grad_Wx:cmul(dWx,Vx):cdiv(norm_x)
 
       local dGradGx = self.buffer5:resize(1,grad_Wx:size(2)):sum(grad_Wx,1)
       grad_Gx:add(dGradGx)
 
       dWx:cmul(scale_x)
 
-      grad_Wx:copy(Vx):cmul(scale_x):cdiv(norm_x)
+      grad_Wx:cmul(Vx,scale_x):cdiv(norm_x)
       grad_Wx:cmul(dGradGx:expandAs(grad_Wx))    
 
       dWx:add(-1,grad_Wx)
@@ -469,14 +465,14 @@ function SeqLSTM_WN:backward(input, gradOutput, scale)
       --
       local dWh = self.buffer6:resize(prev_h:t():size(1), grad_a:size(2)):mm(prev_h:t(), grad_a)
 
-      grad_Wh:copy(dWh):cmul(Vh):cdiv(norm_h)
+      grad_Wh:cmul(dWh,Vh):cdiv(norm_h)
 
       local dGradGh = self.buffer7:resize(1,grad_Wh:size(2)):sum(grad_Wh,1)
       grad_Gh:add(dGradGh)
 
       dWh:cmul(scale_h)
 
-      grad_Wh:copy(Vh):cmul(scale_h):cdiv(norm_h)
+      grad_Wh:cmul(Vh,scale_h):cdiv(norm_h)
       grad_Wh:cmul(dGradGh:expandAs(grad_Wh))    
 
       dWh:add(-1,grad_Wh)
@@ -588,6 +584,7 @@ end
 
 function SeqLSTM_WN:evaluate()
    if self.train ~= false then
+      self:updateWeightMatrix()
       -- forget at the start of each evaluation
       self:forget()
    end
@@ -596,6 +593,8 @@ function SeqLSTM_WN:evaluate()
 end
 
 function SeqLSTM_WN:toFastLSTM()   
+   self:updateWeightMatrix()
+
    local D, H = self.inputsize, self.outputsize
    -- input : x to ...
    local Wxi = self.weight[{{1, D},{1, H}}]

@@ -29,10 +29,8 @@ function SeqLSTMP_WN:initFromWeight(weight, weightO)
 
    weightO = weightO or self.weightO
 
-   self.gO = weightO:norm(2,1):add(self.eps)
+   self.gO = weightO:norm(2,1):clamp(self.eps,math.huge)
    self.vO:copy(weightO)
-
-   self.dirty = true
 
    return self
 end
@@ -40,6 +38,7 @@ end
 function SeqLSTMP_WN:reset(std)
    self.bias:zero()
    self.bias[{{self.outputsize + 1, 2 * self.outputsize}}]:fill(1)
+
    if not std then
       self.weight:normal(0, 1.0 / math.sqrt(self.hiddensize + self.inputsize))
       self.weightO:normal(0, 1.0 / math.sqrt(self.outputsize + self.hiddensize))
@@ -56,15 +55,11 @@ end
 function SeqLSTMP_WN:updateWeightMatrix()
    parent.updateWeightMatrix(self)
 
-   if self.dirty or self.train then
-      local H, R, D = self.hiddensize, self.outputsize, self.inputsize
+   local H, R, D = self.hiddensize, self.outputsize, self.inputsize
 
-      self.normO:norm(self.vO,2,1):add(self.eps)      
-      self.scaleO:copy(self.gO):cdiv(self.normO)
-      self.weightO:copy(self.vO):cmul(self.scaleO:expandAs(self.vO))
-            
-      self.dirty = false
-   end
+   self.normO:norm(self.vO,2,1):clamp(self.eps,math.huge)
+   self.scaleO:cdiv(self.gO,self.normO)
+   self.weightO:cmul(self.vO,self.scaleO:expandAs(self.vO))
 end
 
 function SeqLSTMP_WN:adapter(t)
@@ -88,14 +83,14 @@ function SeqLSTMP_WN:gradAdapter(scale, t)
    local normO = self.normO:expandAs(self.vO)
    local scaleO = self.scaleO:expandAs(self.vO)
 
-   self.gradWeightO:copy(dWo):cmul(self.vO):cdiv(normO)
+   self.gradWeightO:cmul(dWo,self.vO):cdiv(normO)
 
    local dGradGO = self.bufferO2:resize(1,self.gradWeightO:size(2)):sum(self.gradWeightO,1)
    self.gradGO:add(dGradGO)
 
    dWo:cmul(scaleO)
 
-   self.gradWeightO:copy(self.vO):cmul(scaleO):cdiv(normO)
+   self.gradWeightO:cmul(self.vO,scaleO):cdiv(normO)
    self.gradWeightO:cmul(dGradGO:expandAs(self.gradWeightO))    
 
    dWo:add(-1,self.gradWeightO)
