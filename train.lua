@@ -31,7 +31,6 @@ require 'audio'
 require 'xlua'
 require 'SeqGRU_WN'
 require 'SeqLSTM_WN'
-require 'SeqLSTMP_WN'
 require 'utils'
 
 local threads = require 'threads'
@@ -65,7 +64,7 @@ cmd:text('')
 
 cmd:text('Model configuration:')
 cmd:option('-cudnn_rnn',false,'Enables CUDNN for the RNN modules, when disabled a weight normalized version of SeqGRU is used')
-cmd:option('-rnn_type','GRU','GRU | LSTM | LSTMP - Selects GRU, LSTM or LSTM with peephole connections as the RNN type')
+cmd:option('-rnn_type','GRU','GRU | LSTM - Selects GRU or LSTM as the RNN type')
 cmd:option('-q_levels',256,'The number of quantization levels')
 cmd:option('-q_type','linear','linear | mu-law - The quantization scheme')
 cmd:option('-norm_type','min-max','min-max | abs-max | none - The normalization scheme')
@@ -104,8 +103,7 @@ else
     assert(args.linear_type == 'WN' or args.linear_type == 'default', 'linear_type must be "WN" or "default"')
     assert(args.q_type == 'mu-law' or args.q_type == 'linear', 'q_type must be "mu-law" or "linear"')
     assert(args.norm_type == 'min-max' or args.norm_type == 'abs-max' or args.norm_type == 'none', 'norm_type must be "min-max", "abs-max" or "none"')
-    assert(args.rnn_type == 'GRU' or args.rnn_type == 'LSTM' or args.rnn_type == 'LSTMP', 'rnn_type must be "GRU", "LSTM" or "LSTMP"')
-    assert(not (args.cudnn_rnn and args.rnn_type == 'LSTMP'), 'Peephole connections are not supported in the CUDNN LSTM')
+    assert(args.rnn_type == 'GRU' or args.rnn_type == 'LSTM', 'rnn_type must be "GRU" or "LSTM"')
 
     path.mkdir('sessions/')
     path.mkdir(session_path)
@@ -324,7 +322,7 @@ function create_samplernn()
                 gru.weight[{{D+1,D+H},{2*H+1,3*H}}]:copy(ortho(H,H)) -- Ortho initialization
                 gru:initFromWeight()
             end
-        elseif rnn_type == 'LSTM' or rnn_type == 'LSTMP' then
+        elseif rnn_type == 'LSTM' then
             local rnns = net:findModules('nn.Seq'..rnn_type..'_WN')
             for _,lstm in pairs(rnns) do
                 local D, H = lstm.inputsize, lstm.outputsize
@@ -337,9 +335,6 @@ function create_samplernn()
                 
                 stdv = math.sqrt(1 / H) * math.sqrt(3)
                 lstm.weight[{{D+1,D+H}}]:uniform(-stdv, stdv)                
-                if rnn_type == 'LSTMP' then
-                    lstm.weightO:uniform(-stdv, stdv)
-                end
                                 
                 lstm:initFromWeight()
             end
@@ -353,7 +348,6 @@ function create_samplernn()
             require 'rnn'
             require 'SeqGRU_WN'
             require 'SeqLSTM_WN'
-            require 'SeqLSTMP_WN'
         end):cuda()
     end
 
