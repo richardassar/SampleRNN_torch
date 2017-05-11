@@ -26,7 +26,6 @@ require 'nn'
 require 'cunn'
 require 'cudnn'
 require 'rnn'
-require 'LinearWeightNorm' -- https://github.com/torch/nn/pull/1162
 require 'optim'
 require 'audio'
 require 'xlua'
@@ -350,7 +349,6 @@ function create_samplernn()
         net = nn.DataParallelTable(1,true,use_nccl):add(net,gpus):threads(function()
             local cudnn = require 'cudnn'
             require 'rnn'
-            require 'LinearWeightNorm'
             require 'SeqGRU_WN'
             require 'SeqLSTM_WN'
             require 'SeqLSTMP_WN'
