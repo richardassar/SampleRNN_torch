@@ -25,10 +25,8 @@ SOFTWARE.
 require 'rnn'
 require 'cudnn'
 require 'audio'
-require 'LinearWeightNorm' -- https://github.com/torch/nn/pull/1162
 require 'SeqGRU_WN'
 require 'SeqLSTM_WN'
-require 'SeqLSTMP_WN'
 require 'utils'
 
 --
